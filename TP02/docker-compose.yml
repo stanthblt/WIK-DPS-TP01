@@ -1,0 +1,69 @@
+# Application complète : reverse-proxy (nginx) -> API (Flask) -> base (PostgreSQL).
+#
+# Démontre :
+#   - plusieurs services interconnectés
+#   - plusieurs réseaux (cloisonnement proxy/api et api/db)
+#   - un volume nommé persistant pour la base de données
+#
+# Lancement : docker compose up --build
+# Test      : curl http://localhost:8080/ping
+
+services:
+  # --- Reverse-proxy ------------------------------------------------------
+  proxy:
+    image: nginx:1.27-alpine
+    ports:
+      - "8080:80"          # seul point d'entrée exposé sur l'hôte
+    volumes:
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - api
+    networks:
+      - frontend           # ne voit que l'API, pas la base
+    restart: unless-stopped
+
+  # --- API ----------------------------------------------------------------
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.multistage   # on déploie l'image multi-stage
+    environment:
+      PING_LISTEN_PORT: 2456
+      # Coordonnées de la base (l'API peut s'y connecter si besoin).
+      DATABASE_URL: postgresql://app:app@db:5432/app
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - frontend           # joignable par le proxy
+      - backend            # peut joindre la base
+    restart: unless-stopped
+
+  # --- Base de données ----------------------------------------------------
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: app
+      POSTGRES_DB: app
+    volumes:
+      - db-data:/var/lib/postgresql/data   # persistance des données
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app -d app"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - backend            # isolée : ni le proxy ni l'hôte n'y accèdent
+    restart: unless-stopped
+
+# Deux réseaux pour cloisonner les flux :
+#   frontend : proxy <-> api
+#   backend  : api   <-> db   (la base n'est jamais exposée au proxy/hôte)
+networks:
+  frontend:
+  backend:
+
+# Volume nommé : les données Postgres survivent à un `docker compose down`.
+volumes:
+  db-data:

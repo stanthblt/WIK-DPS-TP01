@@ -1,0 +1,61 @@
+# syntax=docker/dockerfile:1
+###############################################################################
+# Image multi-stage pour l'API WIK-DPS-TP01 (Flask).
+#
+#   Stage 1 (builder) : base Alpine + chaîne de compilation (gcc, musl-dev...).
+#                       Installe les dépendances dans un virtualenv isolé.
+#                       Contient pip, le toolchain et le cache de build.
+#   Stage 2 (runtime) : base Alpine SANS toolchain. Récupère uniquement le
+#                       virtualenv prêt à l'emploi -> aucune trace des outils
+#                       de build, du compilateur, du cache ni du requirements.
+#
+# Résultat : image finale nettement plus petite (~60 Mo vs ~210 Mo) et
+# surface d'attaque réduite.
+###############################################################################
+
+# --- Stage 1 : build -------------------------------------------------------
+FROM python:3.13-alpine AS builder
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
+
+# Toolchain nécessaire pour compiler d'éventuelles dépendances natives.
+# Il reste CONFINÉ au stage de build et n'ira jamais dans l'image finale.
+RUN apk add --no-cache build-base
+
+# Virtualenv dédié : tout y est confiné -> on ne copiera QUE ce dossier.
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:${PATH}"
+
+WORKDIR /build
+
+# Dépendances d'abord (cache des layers), code applicatif ensuite.
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# --- Stage 2 : runtime -----------------------------------------------------
+FROM python:3.13-alpine AS runtime
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PATH="/opt/venv/bin:${PATH}" \
+    PING_LISTEN_PORT=2456
+
+# Utilisateur non-root dédié à l'exécution du serveur web.
+RUN addgroup -g 1000 appuser \
+    && adduser -u 1000 -G appuser -D -H -s /sbin/nologin appuser
+
+# On récupère uniquement le virtualenv produit par le builder.
+# => pas de gcc, pas de cache pip, pas de requirements.txt, pas de sources de build.
+COPY --from=builder /opt/venv /opt/venv
+
+WORKDIR /app
+COPY app.py .
+
+USER appuser
+
+EXPOSE 2456
+
+# `exec` => gunicorn devient PID 1 et reçoit correctement SIGTERM.
+CMD exec gunicorn --bind "0.0.0.0:${PING_LISTEN_PORT}" --workers 2 app:app
