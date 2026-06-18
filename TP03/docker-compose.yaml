@@ -1,0 +1,40 @@
+# TP03 — API répliquée (x4) derrière un reverse-proxy nginx en load-balancer.
+#
+# Seul le reverse-proxy est exposé sur l'hôte (port 8080).
+# Les 4 réplicas de l'API ne sont joignables que via le réseau interne.
+#
+# Lancement   : docker compose up -d --build
+# Test        : curl -i http://localhost:8080/ping   (voir l'en-tête X-Served-By)
+# Logs LB     : docker compose logs -f api
+
+services:
+  # --- API (image du TP02), répliquée 4 fois -----------------------------
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      PING_LISTEN_PORT: 2456
+    expose:
+      - "2456"          # exposé seulement au réseau interne, PAS à l'hôte
+    deploy:
+      replicas: 4       # 4 réplicas (honoré par `docker compose up`)
+    networks:
+      - appnet
+    restart: unless-stopped
+
+  # --- Reverse-proxy / load-balancer -------------------------------------
+  proxy:
+    image: nginx:1.27-alpine
+    ports:
+      - "8080:80"       # SEUL point d'entrée exposé sur l'hôte
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - api
+    networks:
+      - appnet
+    restart: unless-stopped
+
+networks:
+  appnet:
